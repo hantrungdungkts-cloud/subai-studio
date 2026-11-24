@@ -1646,8 +1646,8 @@ body.mobile-mode .app-shell {
 }
 
 /* On desktop monitor when toggling Mobile Mode, show realistic centered phone frame */
-@media (min-width: 769px) {
-  body.mobile-mode .app-shell {
+@media (min-width: 769px) and (hover: hover) and (pointer: fine) {
+  body.mobile-mode:not(.mobile-device) .app-shell {
     max-width: 430px !important;
     margin: 0 auto !important;
     border-left: 1px solid var(--border-strong);
