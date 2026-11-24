@@ -112,11 +112,27 @@ function initMobileMode() {
   const icon = document.getElementById("mobileModeIcon");
   const text = document.getElementById("mobileModeText");
 
+  const ua = navigator.userAgent || "";
+  const isAppOrMobile = /Android|iPhone|iPad|iPod|Mobile|SubAIStudioMobile/i.test(ua) || window.AndroidNative !== undefined || window.innerWidth <= 850;
   const savedMobile = localStorage.getItem("subai_mobile_mode");
-  const isMobileInitial = savedMobile === "true" || (savedMobile === null && window.innerWidth <= 768);
+
+  let isMobileInitial = true;
+  if (isAppOrMobile) {
+    if (ua.includes("SubAIStudioMobile") || window.AndroidNative !== undefined) {
+      isMobileInitial = true;
+    } else {
+      isMobileInitial = savedMobile !== "false";
+    }
+  } else {
+    isMobileInitial = savedMobile === "true" || window.innerWidth <= 850;
+  }
 
   function applyMobileMode(isMobile, showNotice) {
+    document.documentElement.classList.toggle("mobile-mode", isMobile);
     document.body.classList.toggle("mobile-mode", isMobile);
+    if (isMobile) {
+      document.body.classList.add("mobile-device");
+    }
     if (icon) icon.textContent = isMobile ? "💻" : "📱";
     if (text) text.textContent = isMobile ? "Giao diện PC" : "Giao diện ĐT";
     if (!isMobile) {
@@ -143,7 +159,7 @@ function initMobileMode() {
 
   window.addEventListener("resize", () => {
     if (localStorage.getItem("subai_mobile_mode") === null) {
-      applyMobileMode(window.innerWidth <= 768, false);
+      applyMobileMode(window.innerWidth <= 850 || isAppOrMobile, false);
     }
   });
 
