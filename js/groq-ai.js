@@ -151,42 +151,159 @@ export async function transcribeFileDirectlyWithGroq(file, apiKey, sourceLanguag
   return out;
 }
 
-export async function transcribeWithGroqCloud(pcm16k, apiKey, sourceLanguage, onStatus, onChunkDone) {
+function compressSilenceForGroq(pcm16k) {
+  // Strip silent gaps (> 2.0s) before sending to Groq to save 30-50% of free Groq audio quota!
+  const SR = 16000;
+  const WIN = SR * 0.5; // 0.5s windows
+  const THRESHOLD = 0.003;
+  const totalWins = Math.ceil(pcm16k.length / WIN);
+  const active = new Uint8Array(totalWins);
+
+  for (let w = 0; w < totalWins; w++) {
+    const s = w * WIN;
+    const e = Math.min(pcm16k.length, s + WIN);
+    let sumSq = 0;
+    let cnt = 0;
+    for (let i = s; i < e; i += 16) {
+      const v = pcm16k[i];
+      sumSq += v * v;
+      cnt++;
+    }
+    if (cnt > 0 && Math.sqrt(sumSq / cnt) >= THRESHOLD) {
+      // Mark window and 1s padding before/after as active
+      for (let p = Math.max(0, w - 2); p <= Math.min(totalWins - 1, w + 2); p++) {
+        active[p] = 1;
+      }
+    }
+  }
+
+  // Group contiguous active windows into segments
+  const ranges = [];
+  let runStart = -1;
+  for (let w = 0; w < totalWins; w++) {
+    if (active[w] && runStart === -1) runStart = w;
+    if ((!active[w] || w === totalWins - 1) && runStart !== -1) {
+      const runEnd = active[w] ? w + 1 : w;
+      ranges.push({
+        origStartSample: runStart * WIN,
+        origEndSample: Math.min(pcm16k.length, runEnd * WIN),
+      });
+      runStart = -1;
+    }
+  }
+
+  if (!ranges.length) {
+    return {
+      pcm: pcm16k,
+      mapTime: (t) => t,
+    };
+  }
+
+  let totalSamples = 0;
+  for (const r of ranges) totalSamples += r.origEndSample - r.origStartSample;
+
+  // If less than 12% saved, skip re-packing
+  if (totalSamples > pcm16k.length * 0.88) {
+    return {
+      pcm: pcm16k,
+      mapTime: (t) => t,
+    };
+  }
+
+  const compressed = new Float32Array(totalSamples);
+  const timeMap = [];
+  let cursor = 0;
+  for (const r of ranges) {
+    const len = r.origEndSample - r.origStartSample;
+    compressed.set(pcm16k.subarray(r.origStartSample, r.origEndSample), cursor);
+    timeMap.push({
+      compStartSec: cursor / SR,
+      compEndSec: (cursor + len) / SR,
+      origStartSec: r.origStartSample / SR,
+    });
+    cursor += len;
+  }
+
+  const mapTime = (compSec) => {
+    for (const seg of timeMap) {
+      if (compSec <= seg.compEndSec + 0.05) {
+        return seg.origStartSec + Math.max(0, compSec - seg.compStartSec);
+      }
+    }
+    const last = timeMap[timeMap.length - 1];
+    return last ? last.origStartSec + (compSec - last.compStartSec) : compSec;
+  };
+
+  return { pcm: compressed, mapTime };
+}
+
+export async function transcribeWithGroqCloud(pcm16k, apiKeyInput, sourceLanguage, onStatus, onChunkDone) {
+  const keys = String(apiKeyInput || "")
+    .split(/[\s,;]+/)
+    .map((k) => k.trim())
+    .filter((k) => k.startsWith("gsk_"));
+  if (!keys.length) throw new Error("Groq API Key không hợp lệ.");
+
+  // Save 30-50% Groq quota by stripping long silent sections before upload
+  const { pcm, mapTime } = compressSilenceForGroq(pcm16k);
   const SAMPLE_RATE = 16000;
-  // 8 minutes per chunk (~15MB WAV, under Groq 25MB limit): fewer HTTP requests, same as v4 speed!
   const CHUNK_SECONDS = 480;
   const CHUNK_SAMPLES = CHUNK_SECONDS * SAMPLE_RATE;
 
   const chunks = [];
-  for (let startSample = 0; startSample < pcm16k.length; startSample += CHUNK_SAMPLES) {
-    const endSample = Math.min(pcm16k.length, startSample + CHUNK_SAMPLES);
+  for (let startSample = 0; startSample < pcm.length; startSample += CHUNK_SAMPLES) {
+    const endSample = Math.min(pcm.length, startSample + CHUNK_SAMPLES);
     chunks.push({
-      slice: pcm16k.subarray(startSample, endSample),
+      slice: pcm.subarray(startSample, endSample),
       offsetSec: startSample / SAMPLE_RATE,
     });
   }
 
   if (onStatus) {
     onStatus(
-      `Đang gửi ${chunks.length} đoạn nhỏ lên Groq Cloud (4 luồng song song)...`,
+      `Đang gửi ${chunks.length} đoạn (đã nén khoảng lặng tiết kiệm Groq)...`,
       15
     );
   }
 
   const resultsByChunk = new Array(chunks.length);
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 3;
   let nextIdx = 0;
   let doneCount = 0;
+  let keyIdx = 0;
 
   async function worker() {
     while (nextIdx < chunks.length) {
       const idx = nextIdx++;
       const ch = chunks[idx];
-      const segs = await transcribeChunkGroq(ch.slice, ch.offsetSec, apiKey, sourceLanguage);
-      resultsByChunk[idx] = segs;
+      let segs = null;
+      let lastErr = null;
+
+      for (let attempt = 0; attempt < keys.length; attempt++) {
+        const currentKey = keys[(keyIdx + attempt) % keys.length];
+        try {
+          segs = await transcribeChunkGroq(ch.slice, ch.offsetSec, currentKey, sourceLanguage);
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (String(err?.message || "").includes("429") && attempt + 1 < keys.length) {
+            keyIdx = (keyIdx + 1) % keys.length;
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (!segs) throw lastErr || new Error("Groq Cloud lỗi");
+
+      const mapped = segs.map((s) => ({
+        start: Number(mapTime(s.start).toFixed(3)),
+        end: Number(mapTime(s.end).toFixed(3)),
+        text: s.text,
+      }));
+      resultsByChunk[idx] = mapped;
       doneCount++;
       if (onChunkDone) {
-        onChunkDone(idx, segs, doneCount, chunks.length);
+        onChunkDone(idx, mapped, doneCount, chunks.length);
       }
       if (onStatus) {
         const pct = Math.round(15 + (doneCount / chunks.length) * 60);

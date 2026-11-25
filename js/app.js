@@ -9,6 +9,7 @@ import { initStylePanel } from "./styles.js";
 import { extractAudioAndPeaks } from "./audio-utils.js";
 import { translateBatch } from "./translator.js";
 import { transcribeWithGroqCloud, transcribeFileDirectlyWithGroq } from "./groq-ai.js";
+import { transcribeWithGeminiCloud } from "./gemini-ai.js";
 import {
   saveProjectLocal,
   listProjectsLocal,
@@ -434,87 +435,153 @@ async function runClientSideAI() {
   }
 
   try {
+    let cloudHandled = false;
+
     if (useGroq) {
-      setAiBanner(
-        true,
-        "⚡ Chế độ Siêu Tốc (Groq Cloud 200x) đang chạy...",
-        "Đang xử lý âm thanh siêu tốc trên Cloud...",
-        10
-      );
-
-      const translatedByChunk = {};
-      const chunkTransPromises = [];
-
-      const segments = currentPcm16k
-        ? await transcribeWithGroqCloud(
-            currentPcm16k,
-            state.groqApiKey,
-            state.sourceLanguage,
-            (msg, pct) => {
-              setAiBanner(true, "⚡ Groq Cloud đang nhận diện giọng nói...", msg, pct);
-            },
-            (chunkIdx, segs) => {
-              if (!segs.length) return;
-              // Start translating this 2-minute chunk immediately while other chunks upload/transcribe!
-              const p = translateBatch(segs.map((s) => s.text), state.targetLanguage).then((tr) => {
-                translatedByChunk[chunkIdx] = segs.map((seg, i) => ({
-                  id: `sub-${Date.now()}-${chunkIdx}-${i}`,
-                  start: seg.start,
-                  end: seg.end,
-                  originalText: seg.text,
-                  translatedText: tr[i] || seg.text,
-                }));
-              });
-              chunkTransPromises.push(p);
-            }
-          )
-        : await transcribeFileDirectlyWithGroq(
-            currentVideoFile,
-            state.groqApiKey,
-            state.sourceLanguage,
-            (msg, pct) => {
-              setAiBanner(true, "⚡ Groq Cloud đang nhận diện trực tiếp...", msg, pct);
-            }
-          );
-
-      if (!isGenerating) return;
-      if (!segments.length) {
-        throw new Error("Không nhận diện được lời thoại trong video.");
-      }
-
-      let subs = [];
-      if (currentPcm16k && chunkTransPromises.length > 0) {
-        setAiBanner(true, `Đang hoàn tất dịch ${segments.length} câu...`, `Đích: ${state.targetLanguage}`, 88);
-        await Promise.all(chunkTransPromises);
-        const sortedKeys = Object.keys(translatedByChunk).map(Number).sort((a, b) => a - b);
-        for (const k of sortedKeys) {
-          subs.push(...translatedByChunk[k]);
-        }
-      } else {
+      try {
         setAiBanner(
           true,
-          `Đã nhận diện ${segments.length} câu! Đang dịch 8 luồng sang ${state.targetLanguage}...`,
-          "Dịch tốc độ cao...",
-          75
+          "⚡ Chế độ Siêu Tốc (Groq Cloud 200x) đang chạy...",
+          "Đang nén khoảng lặng & xử lý trên Cloud...",
+          10
         );
-        const origTexts = segments.map((s) => s.text);
-        const translatedTexts = await translateBatch(origTexts, state.targetLanguage, (done, total) => {
-          const pct = Math.round(75 + (done / Math.max(1, total)) * 24);
-          setAiBanner(true, `⚡ AI đang dịch (${done}/${total})...`, `Đích: ${state.targetLanguage}`, pct);
-        });
-        subs = segments.map((seg, idx) => ({
-          id: `sub-${Date.now()}-${idx}`,
-          start: seg.start,
-          end: seg.end,
-          originalText: seg.text,
-          translatedText: translatedTexts[idx] || seg.text,
-        }));
-      }
 
-      setSubtitles(subs, true);
-      showToast(`⚡ Hoàn tất siêu tốc! Đã tạo & dịch ${subs.length} câu phụ đề.`, "success", 4500);
-      saveCurrentProject(true);
-      return;
+        const translatedByChunk = {};
+        const chunkTransPromises = [];
+
+        const segments = currentPcm16k
+          ? await transcribeWithGroqCloud(
+              currentPcm16k,
+              state.groqApiKey,
+              state.sourceLanguage,
+              (msg, pct) => {
+                setAiBanner(true, "⚡ Groq Cloud đang nhận diện giọng nói...", msg, pct);
+              },
+              (chunkIdx, segs) => {
+                if (!segs.length) return;
+                const p = translateBatch(segs.map((s) => s.text), state.targetLanguage).then((tr) => {
+                  translatedByChunk[chunkIdx] = segs.map((seg, i) => ({
+                    id: `sub-${Date.now()}-${chunkIdx}-${i}`,
+                    start: seg.start,
+                    end: seg.end,
+                    originalText: seg.text,
+                    translatedText: tr[i] || seg.text,
+                  }));
+                });
+                chunkTransPromises.push(p);
+              }
+            )
+          : await transcribeFileDirectlyWithGroq(
+              currentVideoFile,
+              state.groqApiKey,
+              state.sourceLanguage,
+              (msg, pct) => {
+                setAiBanner(true, "⚡ Groq Cloud đang nhận diện trực tiếp...", msg, pct);
+              }
+            );
+
+        if (!isGenerating) return;
+        if (!segments.length) {
+          throw new Error("Không nhận diện được lời thoại trong video.");
+        }
+
+        let subs = [];
+        if (currentPcm16k && chunkTransPromises.length > 0) {
+          setAiBanner(true, `Đang hoàn tất dịch ${segments.length} câu...`, `Đích: ${state.targetLanguage}`, 88);
+          await Promise.all(chunkTransPromises);
+          const sortedKeys = Object.keys(translatedByChunk).map(Number).sort((a, b) => a - b);
+          for (const k of sortedKeys) {
+            subs.push(...translatedByChunk[k]);
+          }
+        } else {
+          setAiBanner(
+            true,
+            `Đã nhận diện ${segments.length} câu! Đang dịch 8 luồng sang ${state.targetLanguage}...`,
+            "Dịch tốc độ cao...",
+            75
+          );
+          const origTexts = segments.map((s) => s.text);
+          const translatedTexts = await translateBatch(origTexts, state.targetLanguage, (done, total) => {
+            const pct = Math.round(75 + (done / Math.max(1, total)) * 24);
+            setAiBanner(true, `⚡ AI đang dịch (${done}/${total})...`, `Đích: ${state.targetLanguage}`, pct);
+          });
+          subs = segments.map((seg, idx) => ({
+            id: `sub-${Date.now()}-${idx}`,
+            start: seg.start,
+            end: seg.end,
+            originalText: seg.text,
+            translatedText: translatedTexts[idx] || seg.text,
+          }));
+        }
+
+        setSubtitles(subs, true);
+        showToast(`⚡ Hoàn tất siêu tốc! Đã tạo & dịch ${subs.length} câu phụ đề.`, "success", 4500);
+        saveCurrentProject(true);
+        cloudHandled = true;
+      } catch (groqErr) {
+        if (!isGenerating) return;
+        console.warn("Groq fallback triggered:", groqErr);
+        const isQuota = String(groqErr?.message || "").includes("429") || String(groqErr?.message || "").toLowerCase().includes("rate");
+        showToast(
+          isQuota
+            ? "Groq tạm hết lượt miễn phí — tự động chuyển sang AI dự phòng!"
+            : `Groq gặp sự cố (${groqErr.message}) — chuyển sang AI dự phòng!`,
+          "info",
+          4000
+        );
+      }
+    }
+
+    if (cloudHandled) return;
+
+    const useGemini = Boolean(state.geminiApiKey && state.geminiApiKey.trim());
+    if (useGemini && currentPcm16k) {
+      try {
+        setAiBanner(true, "✨ Gemini Flash Cloud đang nghe...", "Đang xử lý âm thanh qua Google Gemini...", 15);
+        const translatedByChunk = {};
+        const chunkTransPromises = [];
+
+        const segments = await transcribeWithGeminiCloud(
+          currentPcm16k,
+          state.geminiApiKey,
+          state.sourceLanguage,
+          (msg, pct) => setAiBanner(true, "✨ Gemini Flash đang nhận diện...", msg, pct),
+          (chunkIdx, segs) => {
+            if (!segs.length) return;
+            const p = translateBatch(segs.map((s) => s.text), state.targetLanguage).then((tr) => {
+              translatedByChunk[chunkIdx] = segs.map((seg, i) => ({
+                id: `sub-${Date.now()}-gm-${chunkIdx}-${i}`,
+                start: seg.start,
+                end: seg.end,
+                originalText: seg.text,
+                translatedText: tr[i] || seg.text,
+              }));
+            });
+            chunkTransPromises.push(p);
+          }
+        );
+
+        if (!isGenerating) return;
+        if (segments.length > 0) {
+          setAiBanner(true, `Đang hoàn tất dịch ${segments.length} câu...`, `Đích: ${state.targetLanguage}`, 88);
+          await Promise.all(chunkTransPromises);
+          const subs = [];
+          const sortedKeys = Object.keys(translatedByChunk).map(Number).sort((a, b) => a - b);
+          for (const k of sortedKeys) subs.push(...translatedByChunk[k]);
+          setSubtitles(subs, true);
+          showToast(`✨ Hoàn tất qua Gemini! Đã tạo & dịch ${subs.length} câu phụ đề.`, "success", 4500);
+          saveCurrentProject(true);
+          return;
+        }
+      } catch (gemErr) {
+        if (!isGenerating) return;
+        console.warn("Gemini fallback to local Whisper:", gemErr);
+        showToast(`Gemini lỗi (${gemErr.message}) — chuyển sang Whisper trên máy!`, "info", 3500);
+      }
+    }
+
+    if (!currentPcm16k) {
+      throw new Error("Không tách được âm thanh 16kHz để chạy AI trên máy.");
     }
 
     // LOCAL TURBO STREAMING MODE:
@@ -690,6 +757,7 @@ function initSettingsModal() {
   const selectDubGender = document.getElementById("selectDubGender");
   const selectDubEmotion = document.getElementById("selectDubEmotion");
   const inputGroqKey = document.getElementById("inputGroqKey");
+  const inputGeminiKey = document.getElementById("inputGeminiKey");
   const btnSave = document.getElementById("btnSaveSettings");
 
   btnOpen.addEventListener("click", () => {
@@ -698,6 +766,7 @@ function initSettingsModal() {
     if (selectDubGender) selectDubGender.value = state.dubVoiceGender || "female";
     if (selectDubEmotion) selectDubEmotion.value = state.dubEmotion || "natural";
     if (inputGroqKey) inputGroqKey.value = state.groqApiKey || "";
+    if (inputGeminiKey) inputGeminiKey.value = state.geminiApiKey || "";
     modal.hidden = false;
   });
 
@@ -709,6 +778,7 @@ function initSettingsModal() {
     if (selectDubGender) state.dubVoiceGender = selectDubGender.value;
     if (selectDubEmotion) state.dubEmotion = selectDubEmotion.value;
     if (inputGroqKey) state.groqApiKey = inputGroqKey.value.trim();
+    if (inputGeminiKey) state.geminiApiKey = inputGeminiKey.value.trim();
     persistSettings();
     modal.hidden = true;
     showToast(

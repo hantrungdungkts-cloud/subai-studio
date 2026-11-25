@@ -89,6 +89,7 @@ export const state = {
   // User AI settings
   apiKey: saved.apiKey || "",
   groqApiKey: saved.groqApiKey || "",
+  geminiApiKey: saved.geminiApiKey || "",
   model: saved.model && !saved.model.startsWith("gemini") ? saved.model : "whisper-tiny",
   sourceLanguage: saved.sourceLanguage || "auto",
   targetLanguage: saved.targetLanguage || "Tiếng Việt",
@@ -146,6 +147,7 @@ export function persistSettings() {
       JSON.stringify({
         apiKey: state.apiKey,
         groqApiKey: state.groqApiKey,
+        geminiApiKey: state.geminiApiKey,
         model: state.model,
         sourceLanguage: state.sourceLanguage,
         targetLanguage: state.targetLanguage,
