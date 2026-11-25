@@ -88,8 +88,9 @@ export const state = {
 
   // User AI settings
   apiKey: saved.apiKey || "",
-  model: saved.model && !saved.model.startsWith("gemini") ? saved.model : "whisper-base",
-  sourceLanguage: saved.sourceLanguage || "Tự động nhận diện",
+  groqApiKey: saved.groqApiKey || "",
+  model: saved.model && !saved.model.startsWith("gemini") ? saved.model : "whisper-tiny",
+  sourceLanguage: saved.sourceLanguage || "auto",
   targetLanguage: saved.targetLanguage || "Tiếng Việt",
   translationStyle: saved.translationStyle || "natural",
   contextHint: saved.contextHint || "",
@@ -142,6 +143,7 @@ export function persistSettings() {
       STORAGE_KEY,
       JSON.stringify({
         apiKey: state.apiKey,
+        groqApiKey: state.groqApiKey,
         model: state.model,
         sourceLanguage: state.sourceLanguage,
         targetLanguage: state.targetLanguage,

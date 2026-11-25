@@ -8,6 +8,7 @@ import { initSubtitleEditor } from "./editor.js";
 import { initStylePanel } from "./styles.js";
 import { extractAudioAndPeaks } from "./audio-utils.js";
 import { translateBatch } from "./translator.js";
+import { transcribeWithGroqCloud } from "./groq-ai.js";
 import {
   saveProjectLocal,
   listProjectsLocal,
@@ -351,6 +352,66 @@ function setAiBanner(visible, title, desc, pct) {
   if (btnCancelAI) btnCancelAI.hidden = !visible;
 }
 
+function hasSpeechEnergy(pcmSlice, threshold = 0.0025) {
+  let sumSq = 0;
+  const step = 16; // Fast subsampling check
+  let count = 0;
+  for (let i = 0; i < pcmSlice.length; i += step) {
+    const v = pcmSlice[i];
+    sumSq += v * v;
+    count++;
+  }
+  const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+  return rms >= threshold;
+}
+
+function runWhisperWorkerChunk(audioSlice, modelKey, sourceLanguage, onStatus) {
+  return new Promise((resolve, reject) => {
+    if (!whisperWorker) {
+      whisperWorker = new Worker(new URL("./whisper-worker.js", import.meta.url), {
+        type: "module",
+      });
+    }
+
+    const handleMsg = (e) => {
+      const data = e.data || {};
+      if (data.type === "status") {
+        if (onStatus) onStatus(data.message, data.progress);
+      } else if (data.type === "complete") {
+        cleanup();
+        resolve(data.segments || []);
+      } else if (data.type === "error") {
+        cleanup();
+        reject(new Error(data.error || "Lỗi Whisper Worker"));
+      }
+    };
+
+    const handleErr = (err) => {
+      cleanup();
+      reject(new Error(err?.message || "Lỗi khởi chạy Web Worker AI"));
+    };
+
+    function cleanup() {
+      whisperWorker?.removeEventListener("message", handleMsg);
+      whisperWorker?.removeEventListener("error", handleErr);
+    }
+
+    whisperWorker.addEventListener("message", handleMsg);
+    whisperWorker.addEventListener("error", handleErr);
+
+    const audioCopy = new Float32Array(audioSlice);
+    whisperWorker.postMessage(
+      {
+        type: "transcribe",
+        audio: audioCopy,
+        modelKey,
+        sourceLanguage,
+      },
+      [audioCopy.buffer]
+    );
+  });
+}
+
 async function runClientSideAI() {
   if (!state.video || isGenerating) return;
   if (!currentPcm16k) {
@@ -364,92 +425,173 @@ async function runClientSideAI() {
   btnGenerateAI.disabled = true;
   btnRetranslate.disabled = true;
 
-  setAiBanner(
-    true,
-    `Whisper AI (${state.model}) đang khởi động trên thiết bị...`,
-    "Lần đầu chạy sẽ tải file mô hình (~40MB) và lưu vào bộ nhớ trình duyệt.",
-    5
-  );
+  const useGroq = Boolean(state.groqApiKey && state.groqApiKey.trim());
 
   try {
-    const segments = await new Promise((resolve, reject) => {
-      if (!whisperWorker) {
-        whisperWorker = new Worker(new URL("./whisper-worker.js", import.meta.url), {
-          type: "module",
-        });
-      }
-
-      const handleMsg = (e) => {
-        const data = e.data || {};
-        if (data.type === "status") {
-          setAiBanner(true, `Whisper AI (${state.model}) đang xử lý...`, data.message, data.progress);
-        } else if (data.type === "complete") {
-          cleanup();
-          resolve(data.segments || []);
-        } else if (data.type === "error") {
-          cleanup();
-          reject(new Error(data.error || "Lỗi Whisper Worker"));
-        }
-      };
-
-      const handleErr = (err) => {
-        cleanup();
-        reject(new Error(err?.message || "Lỗi khởi chạy Web Worker AI"));
-      };
-
-      function cleanup() {
-        whisperWorker?.removeEventListener("message", handleMsg);
-        whisperWorker?.removeEventListener("error", handleErr);
-      }
-
-      whisperWorker.addEventListener("message", handleMsg);
-      whisperWorker.addEventListener("error", handleErr);
-
-      // Pass copy of audio buffer so currentPcm16k stays reusable
-      const audioCopy = new Float32Array(currentPcm16k);
-      whisperWorker.postMessage(
-        {
-          type: "transcribe",
-          audio: audioCopy,
-          modelKey: state.model,
-          sourceLanguage: state.sourceLanguage,
-        },
-        [audioCopy.buffer]
+    if (useGroq) {
+      setAiBanner(
+        true,
+        "⚡ Chế độ Siêu Tốc (Groq Cloud 200x) đang chạy...",
+        "Đang xử lý âm thanh siêu tốc trên Cloud...",
+        10
       );
-    });
 
-    if (!segments.length) {
-      throw new Error("Không nhận diện được lời thoại trong video.");
+      const segments = await transcribeWithGroqCloud(
+        currentPcm16k,
+        state.groqApiKey,
+        state.sourceLanguage,
+        (msg, pct) => {
+          setAiBanner(true, "⚡ Groq Cloud đang nhận diện giọng nói...", msg, pct);
+        }
+      );
+
+      if (!isGenerating) return;
+      if (!segments.length) {
+        throw new Error("Không nhận diện được lời thoại trong video.");
+      }
+
+      setAiBanner(
+        true,
+        `Đã nhận diện ${segments.length} câu! Đang dịch song song sang ${state.targetLanguage}...`,
+        "Dịch 6 luồng song song tốc độ cao...",
+        75
+      );
+
+      const origTexts = segments.map((s) => s.text);
+      const translatedTexts = await translateBatch(origTexts, state.targetLanguage, (done, total) => {
+        const pct = Math.round(75 + (done / Math.max(1, total)) * 24);
+        setAiBanner(true, `Đang dịch phụ đề (${done}/${total})...`, `Đích: ${state.targetLanguage}`, pct);
+      });
+
+      const subs = segments.map((seg, idx) => ({
+        id: `sub-${Date.now()}-${idx}`,
+        start: seg.start,
+        end: seg.end,
+        originalText: seg.text,
+        translatedText: translatedTexts[idx] || seg.text,
+      }));
+
+      setSubtitles(subs, true);
+      showToast(`⚡ Hoàn tất siêu tốc! Đã tạo & dịch ${subs.length} câu phụ đề.`, "success", 4500);
+      saveCurrentProject(true);
+      return;
+    }
+
+    // LOCAL TURBO STREAMING MODE:
+    // Split long audio into 30s chunks, skip silent chunks, stream subtitles live, and translate in parallel!
+    const SAMPLE_RATE = 16000;
+    const totalSec = currentPcm16k.length / SAMPLE_RATE;
+    const CHUNK_SEC = totalSec > 45 ? 30 : Math.ceil(totalSec);
+    const CHUNK_SAMPLES = CHUNK_SEC * SAMPLE_RATE;
+
+    const chunks = [];
+    for (let s = 0; s < currentPcm16k.length; s += CHUNK_SAMPLES) {
+      const e = Math.min(currentPcm16k.length, s + CHUNK_SAMPLES);
+      chunks.push({
+        startSample: s,
+        endSample: e,
+        offsetSec: s / SAMPLE_RATE,
+      });
     }
 
     setAiBanner(
       true,
-      `Đã nhận diện ${segments.length} câu! Đang dịch sang ${state.targetLanguage}...`,
-      "Dịch miễn phí tốc độ cao...",
-      75
+      `Whisper AI (${state.model}) đang khởi động...`,
+      chunks.length > 1
+        ? `Video dài ${Math.round(totalSec)}s — chia thành ${chunks.length} đoạn để dịch cuốn chiếu siêu tốc.`
+        : "Lần đầu chạy sẽ tải mô hình và lưu cache trên máy.",
+      5
     );
 
-    const origTexts = segments.map((s) => s.text);
-    const translatedTexts = await translateBatch(origTexts, state.targetLanguage, (done, total) => {
-      const pct = Math.round(75 + (done / Math.max(1, total)) * 24);
-      setAiBanner(
-        true,
-        `Đang dịch phụ đề (${done}/${total})...`,
-        `Đích: ${state.targetLanguage}`,
-        pct
+    const accumulatedSubs = [];
+    const pendingTranslations = [];
+    let skippedSilence = 0;
+
+    for (let i = 0; i < chunks.length; i++) {
+      if (!isGenerating) return;
+      const ch = chunks[i];
+      const slice = currentPcm16k.subarray(ch.startSample, ch.endSample);
+
+      // Skip silent chunks in long videos to save 20-40% processing time
+      if (chunks.length > 1 && !hasSpeechEnergy(slice)) {
+        skippedSilence++;
+        const pct = Math.round(10 + ((i + 1) / chunks.length) * 85);
+        setAiBanner(
+          true,
+          `Đang bỏ qua đoạn im lặng (${i + 1}/${chunks.length})...`,
+          `Đã nhận diện ${accumulatedSubs.length} câu phụ đề`,
+          pct
+        );
+        continue;
+      }
+
+      const rawSegs = await runWhisperWorkerChunk(
+        slice,
+        state.model,
+        state.sourceLanguage,
+        (msg, workerPct) => {
+          const basePct = 10 + (i / chunks.length) * 85;
+          const spanPct = (1 / chunks.length) * 85;
+          const pct =
+            chunks.length === 1
+              ? Math.min(85, workerPct || 50)
+              : Math.round(basePct + ((workerPct || 50) / 100) * spanPct);
+          setAiBanner(
+            true,
+            chunks.length > 1
+              ? `Đang nghe đoạn ${i + 1}/${chunks.length} (đã có ${accumulatedSubs.length} câu)...`
+              : `Whisper AI (${state.model}) đang xử lý...`,
+            msg,
+            pct
+          );
+        }
       );
-    });
 
-    const subs = segments.map((seg, idx) => ({
-      id: `sub-${Date.now()}-${idx}`,
-      start: seg.start,
-      end: seg.end,
-      originalText: seg.text,
-      translatedText: translatedTexts[idx] || seg.text,
-    }));
+      if (!isGenerating) return;
 
-    setSubtitles(subs, true);
-    showToast(`Hoàn tất! Đã tạo & dịch ${subs.length} câu phụ đề miễn phí.`, "success", 4500);
+      if (rawSegs.length > 0) {
+        const chunkSubs = rawSegs.map((seg, idx) => ({
+          id: `sub-${Date.now()}-${i}-${idx}`,
+          start: Number((ch.offsetSec + seg.start).toFixed(3)),
+          end: Number((ch.offsetSec + seg.end).toFixed(3)),
+          originalText: seg.text,
+          translatedText: seg.text,
+        }));
+
+        const startIdx = accumulatedSubs.length;
+        accumulatedSubs.push(...chunkSubs);
+        // Stream subtitles immediately so user sees results live while next chunk processes
+        setSubtitles([...accumulatedSubs], false);
+
+        // Pipeline translation in background while next Whisper chunk runs
+        const textsToTranslate = chunkSubs.map((s) => s.originalText);
+        const transPromise = translateBatch(textsToTranslate, state.targetLanguage).then((translated) => {
+          for (let j = 0; j < chunkSubs.length; j++) {
+            accumulatedSubs[startIdx + j].translatedText = translated[j] || chunkSubs[j].originalText;
+          }
+          setSubtitles([...accumulatedSubs], false);
+        });
+        pendingTranslations.push(transPromise);
+      }
+    }
+
+    if (!isGenerating) return;
+
+    setAiBanner(
+      true,
+      `Đang hoàn tất dịch thuật ${accumulatedSubs.length} câu...`,
+      `Đích: ${state.targetLanguage}`,
+      96
+    );
+    await Promise.all(pendingTranslations);
+
+    if (!accumulatedSubs.length) {
+      throw new Error("Không nhận diện được lời thoại trong video.");
+    }
+
+    setSubtitles([...accumulatedSubs], true);
+    const skipNote = skippedSilence > 0 ? ` (đã bỏ qua ${skippedSilence} đoạn im lặng)` : "";
+    showToast(`Hoàn tất! Đã tạo & dịch ${accumulatedSubs.length} câu phụ đề${skipNote}.`, "success", 4500);
     saveCurrentProject(true);
   } catch (err) {
     if (isGenerating) {
@@ -500,11 +642,13 @@ function initSettingsModal() {
   const btnOpen = document.getElementById("btnOpenSettings");
   const selectModel = document.getElementById("selectModel");
   const selectSourceLang = document.getElementById("selectSourceLang");
+  const inputGroqKey = document.getElementById("inputGroqKey");
   const btnSave = document.getElementById("btnSaveSettings");
 
   btnOpen.addEventListener("click", () => {
     selectModel.value = state.model;
     selectSourceLang.value = state.sourceLanguage;
+    if (inputGroqKey) inputGroqKey.value = state.groqApiKey || "";
     modal.hidden = false;
   });
 
@@ -513,9 +657,15 @@ function initSettingsModal() {
     const engineSel = document.getElementById("engineSelect");
     if (engineSel) engineSel.value = state.model;
     state.sourceLanguage = selectSourceLang.value;
+    if (inputGroqKey) state.groqApiKey = inputGroqKey.value.trim();
     persistSettings();
     modal.hidden = true;
-    showToast("Đã lưu cài đặt AI.", "success");
+    showToast(
+      state.groqApiKey
+        ? "⚡ Đã lưu cài đặt (Đã bật Groq Cloud Siêu Tốc 200x)!"
+        : "Đã lưu cài đặt AI.",
+      "success"
+    );
   });
 
   bindModalClose(modal);

@@ -123,7 +123,7 @@ export async function translateBatch(lines, targetLanguage, onProgress) {
   }
 
   const batches = buildBatches(lines, code);
-  const CONCURRENCY = 4;
+  const CONCURRENCY = 6;
   let nextBatchIdx = 0;
 
   async function processBatch(batch) {
