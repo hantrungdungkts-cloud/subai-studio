@@ -654,12 +654,16 @@ function initSettingsModal() {
   const btnOpen = document.getElementById("btnOpenSettings");
   const selectModel = document.getElementById("selectModel");
   const selectSourceLang = document.getElementById("selectSourceLang");
+  const selectDubGender = document.getElementById("selectDubGender");
+  const selectDubEmotion = document.getElementById("selectDubEmotion");
   const inputGroqKey = document.getElementById("inputGroqKey");
   const btnSave = document.getElementById("btnSaveSettings");
 
   btnOpen.addEventListener("click", () => {
     selectModel.value = state.model;
     selectSourceLang.value = state.sourceLanguage;
+    if (selectDubGender) selectDubGender.value = state.dubVoiceGender || "female";
+    if (selectDubEmotion) selectDubEmotion.value = state.dubEmotion || "natural";
     if (inputGroqKey) inputGroqKey.value = state.groqApiKey || "";
     modal.hidden = false;
   });
@@ -669,6 +673,8 @@ function initSettingsModal() {
     const engineSel = document.getElementById("engineSelect");
     if (engineSel) engineSel.value = state.model;
     state.sourceLanguage = selectSourceLang.value;
+    if (selectDubGender) state.dubVoiceGender = selectDubGender.value;
+    if (selectDubEmotion) state.dubEmotion = selectDubEmotion.value;
     if (inputGroqKey) state.groqApiKey = inputGroqKey.value.trim();
     persistSettings();
     modal.hidden = true;

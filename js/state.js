@@ -93,6 +93,8 @@ export const state = {
   sourceLanguage: saved.sourceLanguage || "auto",
   targetLanguage: saved.targetLanguage || "Tiếng Việt",
   translationStyle: saved.translationStyle || "natural",
+  dubVoiceGender: saved.dubVoiceGender || "female",
+  dubEmotion: saved.dubEmotion || "natural",
   contextHint: saved.contextHint || "",
 
   // Video state
@@ -148,6 +150,8 @@ export function persistSettings() {
         sourceLanguage: state.sourceLanguage,
         targetLanguage: state.targetLanguage,
         translationStyle: state.translationStyle,
+        dubVoiceGender: state.dubVoiceGender,
+        dubEmotion: state.dubEmotion,
         contextHint: state.contextHint,
         style: state.style,
       })

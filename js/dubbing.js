@@ -146,9 +146,20 @@ export function onSubtitleTick(activeSub, videoEl) {
 
   duckVolume(videoEl);
 
-  if (window.AndroidNative?.speakTts) {
+  const gender = state.dubVoiceGender || "female";
+  const emotion = state.dubEmotion || "natural";
+
+  if (window.AndroidNative?.speakTtsEx) {
     window.__onNativeTtsDone = () => {
-      // Wait 600ms before nudging from 5% to 14% so consecutive sentences stay smoothly quiet
+      clearTimeout(restoreTimer);
+      restoreTimer = setTimeout(restoreVolume, 600);
+    };
+    try {
+      window.AndroidNative.speakTtsEx(text, langTag, estimatedRate, gender, emotion);
+      return;
+    } catch {}
+  } else if (window.AndroidNative?.speakTts) {
+    window.__onNativeTtsDone = () => {
       clearTimeout(restoreTimer);
       restoreTimer = setTimeout(restoreVolume, 600);
     };
@@ -163,7 +174,34 @@ export function onSubtitleTick(activeSub, videoEl) {
       window.speechSynthesis.cancel();
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = langTag;
-      utter.rate = estimatedRate;
+
+      // Pick matching gender voice if browser exposes multiple voices
+      const voices = window.speechSynthesis.getVoices() || [];
+      const langPrefix = langTag.split("-")[0].toLowerCase();
+      const matching = voices.filter((v) => (v.lang || "").toLowerCase().startsWith(langPrefix));
+      if (matching.length > 0) {
+        const maleRx = /nam|male|man|guy|daniel|ryan|minh/i;
+        const femaleRx = /nu|nữ|female|woman|hoaimy|linh|jenny|aria|nanami/i;
+        const picked = matching.find((v) =>
+          gender === "male" ? maleRx.test(v.name) : femaleRx.test(v.name)
+        );
+        utter.voice = picked || matching[0];
+      }
+
+      let pitch = gender === "male" ? 0.85 : 1.02;
+      let rate = estimatedRate;
+      if (emotion === "cheerful") {
+        pitch *= 1.1;
+        rate *= 1.07;
+      } else if (emotion === "dramatic") {
+        pitch *= 0.92;
+        rate *= 1.04;
+      } else if (emotion === "sad") {
+        pitch *= 0.86;
+        rate *= 0.9;
+      }
+      utter.pitch = Math.max(0.5, Math.min(1.8, pitch));
+      utter.rate = Math.max(0.6, Math.min(2.0, rate));
       utter.onend = () => {
         clearTimeout(restoreTimer);
         restoreTimer = setTimeout(restoreVolume, 600);
