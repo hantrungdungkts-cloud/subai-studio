@@ -620,7 +620,7 @@ function initFullscreenGestures() {
       } else if (gestureMode === "volume") {
         const delta = -dy / (h * 0.65);
         const newVol = Math.max(0, Math.min(1, startVolume + delta));
-        videoEl.volume = newVol;
+        setSavedUserVolume(newVol);
         videoEl.muted = newVol === 0;
         const volSlider = document.getElementById("volumeSlider");
         if (volSlider) volSlider.value = String(newVol);

@@ -1,5 +1,5 @@
 // AI Voice-Over / Dubbing Engine (Native Android TextToSpeech + Web Speech API fallback)
-// Features auto-ducking (lowers original video volume while AI speaks) and smart speed matching.
+// Smoothly ducks original video volume whenever AI Dubbing is active so narration is crystal clear.
 
 import { state, showToast } from "./state.js";
 
@@ -16,6 +16,9 @@ const TTS_LOCALE_MAP = {
   "ภาษาไทย (Thai)": "th-TH",
 };
 
+const DUCK_SPEAKING_VOL = 0.05; // 5% linear (~25% perceived loudness) while AI speaks
+const DUCK_IDLE_VOL = 0.14;     // 14% background level during pauses while dubbing is ON
+
 let dubbingEnabled = false;
 let lastSpokenId = null;
 let isSpeaking = false;
@@ -29,8 +32,12 @@ export function isDubbingEnabled() {
 
 export function setSavedUserVolume(vol) {
   savedUserVolume = Math.max(0, Math.min(1, Number(vol) || 0));
-  if (!isSpeaking && activeVideoEl) {
-    activeVideoEl.volume = savedUserVolume;
+  if (activeVideoEl && !activeVideoEl.muted) {
+    if (dubbingEnabled) {
+      activeVideoEl.volume = Math.min(savedUserVolume, isSpeaking ? DUCK_SPEAKING_VOL : DUCK_IDLE_VOL);
+    } else {
+      activeVideoEl.volume = savedUserVolume;
+    }
   }
 }
 
@@ -38,7 +45,9 @@ function restoreVolume() {
   clearTimeout(restoreTimer);
   isSpeaking = false;
   if (activeVideoEl && !activeVideoEl.muted) {
-    activeVideoEl.volume = savedUserVolume;
+    activeVideoEl.volume = dubbingEnabled
+      ? Math.min(savedUserVolume, DUCK_IDLE_VOL)
+      : savedUserVolume;
   }
 }
 
@@ -47,25 +56,30 @@ function duckVolume(videoEl) {
   activeVideoEl = videoEl;
   isSpeaking = true;
   if (!videoEl.muted) {
-    videoEl.volume = Math.min(savedUserVolume, 0.16);
+    videoEl.volume = Math.min(savedUserVolume, DUCK_SPEAKING_VOL);
   }
   clearTimeout(restoreTimer);
-  // Safety timeout in case TTS callback doesn't fire
   restoreTimer = setTimeout(restoreVolume, 12000);
 }
 
 export function toggleDubbing(videoEl) {
   dubbingEnabled = !dubbingEnabled;
   lastSpokenId = null;
+  if (videoEl) activeVideoEl = videoEl;
+
   if (!dubbingEnabled) {
     stopDubbing(videoEl);
-    showToast("Đã tắt Thuyết minh AI.", "info", 1800);
+    showToast("Đã tắt Thuyết minh AI (khôi phục âm thanh gốc).", "info", 1800);
   } else {
     if (videoEl) {
-      savedUserVolume = videoEl.volume ?? 1;
-      activeVideoEl = videoEl;
+      if (!isSpeaking && videoEl.volume > DUCK_IDLE_VOL) {
+        savedUserVolume = videoEl.volume ?? 1;
+      }
+      if (!videoEl.muted) {
+        videoEl.volume = Math.min(savedUserVolume, DUCK_IDLE_VOL);
+      }
     }
-    showToast("🎙️ Đã bật Thuyết minh AI (tự động đọc bản dịch & giảm tiếng gốc).", "success", 2500);
+    showToast("🎙️ Đã bật Thuyết minh AI (âm thanh gốc đã tự động giảm nhỏ).", "success", 2500);
   }
   syncDubbingButtons();
   return dubbingEnabled;
@@ -106,10 +120,15 @@ export function onSubtitleTick(activeSub, videoEl) {
   if (!dubbingEnabled || !videoEl || videoEl.paused) return;
   activeVideoEl = videoEl;
 
-  if (!activeSub) {
-    return;
+  // Keep original audio softly ducked whenever dubbing is active
+  if (!videoEl.muted) {
+    const targetMax = isSpeaking ? DUCK_SPEAKING_VOL : DUCK_IDLE_VOL;
+    if (videoEl.volume > targetMax + 0.01) {
+      videoEl.volume = Math.min(savedUserVolume, targetMax);
+    }
   }
-  if (activeSub.id === lastSpokenId) {
+
+  if (!activeSub || activeSub.id === lastSpokenId) {
     return;
   }
 
@@ -120,14 +139,18 @@ export function onSubtitleTick(activeSub, videoEl) {
   const langTag = TTS_LOCALE_MAP[state.targetLanguage] || "vi-VN";
   const cueDur = Math.max(0.8, (activeSub.end || 0) - (activeSub.start || 0));
   const wordCount = text.split(/\s+/).length;
-  // Slightly speed up for dense lines so narration stays synced with video
-  const estimatedRate = Math.min(1.45, Math.max(1.0, (wordCount / (cueDur * 3.1)) * (videoEl.playbackRate || 1)));
+  const estimatedRate = Math.min(
+    1.45,
+    Math.max(1.0, (wordCount / (cueDur * 3.1)) * (videoEl.playbackRate || 1))
+  );
 
   duckVolume(videoEl);
 
   if (window.AndroidNative?.speakTts) {
     window.__onNativeTtsDone = () => {
-      restoreVolume();
+      // Wait 600ms before nudging from 5% to 14% so consecutive sentences stay smoothly quiet
+      clearTimeout(restoreTimer);
+      restoreTimer = setTimeout(restoreVolume, 600);
     };
     try {
       window.AndroidNative.speakTts(text, langTag, estimatedRate);
@@ -141,7 +164,10 @@ export function onSubtitleTick(activeSub, videoEl) {
       const utter = new SpeechSynthesisUtterance(text);
       utter.lang = langTag;
       utter.rate = estimatedRate;
-      utter.onend = restoreVolume;
+      utter.onend = () => {
+        clearTimeout(restoreTimer);
+        restoreTimer = setTimeout(restoreVolume, 600);
+      };
       utter.onerror = restoreVolume;
       window.speechSynthesis.speak(utter);
     } catch {
