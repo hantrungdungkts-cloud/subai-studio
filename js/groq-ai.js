@@ -153,8 +153,8 @@ export async function transcribeFileDirectlyWithGroq(file, apiKey, sourceLanguag
 
 export async function transcribeWithGroqCloud(pcm16k, apiKey, sourceLanguage, onStatus, onChunkDone) {
   const SAMPLE_RATE = 16000;
-  // 2 minutes per chunk (~3.8MB WAV): uploads 4x faster on mobile 4G/Wi-Fi and streams results immediately!
-  const CHUNK_SECONDS = 120;
+  // 8 minutes per chunk (~15MB WAV, under Groq 25MB limit): fewer HTTP requests, same as v4 speed!
+  const CHUNK_SECONDS = 480;
   const CHUNK_SAMPLES = CHUNK_SECONDS * SAMPLE_RATE;
 
   const chunks = [];

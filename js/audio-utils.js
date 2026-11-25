@@ -96,14 +96,18 @@ function computePeaks(pcm16k) {
 
 export async function extractAudioAndPeaks(file, onProgress) {
   let audioBuffer = null;
-
-  // On Android APK, for files (> 25MB) or unsupported codecs, native MediaCodec is faster & uses <5MB RAM
   const hasNative = Boolean(window.AndroidNative?.extractAudio16kAsync);
-  const preferNativeFirst = hasNative && file.size > 25 * 1024 * 1024;
 
-  if (preferNativeFirst) {
-    if (onProgress) onProgress(25, "Đang tách âm thanh bằng phần cứng Android...");
-    try {
+  // ALWAYS try Chromium's ultra-fast C++ decodeAudioData first (same as v4!)
+  // Only fall back to Android MediaCodec if decodeAudioData fails (e.g. MKV/AC3/unsupported codec)
+  if (onProgress) onProgress(15, "Đang đọc dữ liệu video trên thiết bị...");
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    if (onProgress) onProgress(45, "Đang giải mã luồng âm thanh...");
+    audioBuffer = await decodeBufferToAudio(arrayBuffer);
+  } catch (webErr) {
+    if (hasNative) {
+      if (onProgress) onProgress(50, "Đang dùng bộ giải mã phần cứng Android cho video này...");
       const wavBuf = await extractViaAndroidNative();
       const parsed = parseWav16kToFloat32(wavBuf);
       if (parsed) {
@@ -111,33 +115,11 @@ export async function extractAudioAndPeaks(file, onProgress) {
         return { pcm16k: parsed.pcm16k, peaks: computePeaks(parsed.pcm16k), duration: parsed.duration };
       }
       audioBuffer = await decodeBufferToAudio(wavBuf);
-    } catch (nativeErr) {
-      console.warn("Native large-file audio extraction failed, trying Web Audio:", nativeErr);
-    }
-  }
-
-  if (!audioBuffer) {
-    if (onProgress) onProgress(15, "Đang đọc dữ liệu video trên thiết bị...");
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      if (onProgress) onProgress(45, "Đang giải mã luồng âm thanh...");
-      audioBuffer = await decodeBufferToAudio(arrayBuffer);
-    } catch (webErr) {
-      if (hasNative && !preferNativeFirst) {
-        if (onProgress) onProgress(50, "Đang dùng bộ giải mã phần cứng Android cho video này...");
-        const wavBuf = await extractViaAndroidNative();
-        const parsed = parseWav16kToFloat32(wavBuf);
-        if (parsed) {
-          if (onProgress) onProgress(100, "Sẵn sàng!");
-          return { pcm16k: parsed.pcm16k, peaks: computePeaks(parsed.pcm16k), duration: parsed.duration };
-        }
-        audioBuffer = await decodeBufferToAudio(wavBuf);
-      } else {
-        throw new Error(
-          "Không thể giải mã track âm thanh của video: " +
-            (webErr?.message || "Định dạng âm thanh chưa được hỗ trợ")
-        );
-      }
+    } else {
+      throw new Error(
+        "Không thể giải mã track âm thanh của video: " +
+          (webErr?.message || "Định dạng âm thanh chưa được hỗ trợ")
+      );
     }
   }
 
