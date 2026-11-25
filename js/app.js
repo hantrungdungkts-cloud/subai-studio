@@ -442,6 +442,9 @@ async function runClientSideAI() {
         10
       );
 
+      const translatedByChunk = {};
+      const chunkTransPromises = [];
+
       const segments = currentPcm16k
         ? await transcribeWithGroqCloud(
             currentPcm16k,
@@ -449,6 +452,20 @@ async function runClientSideAI() {
             state.sourceLanguage,
             (msg, pct) => {
               setAiBanner(true, "⚡ Groq Cloud đang nhận diện giọng nói...", msg, pct);
+            },
+            (chunkIdx, segs) => {
+              if (!segs.length) return;
+              // Start translating this 2-minute chunk immediately while other chunks upload/transcribe!
+              const p = translateBatch(segs.map((s) => s.text), state.targetLanguage).then((tr) => {
+                translatedByChunk[chunkIdx] = segs.map((seg, i) => ({
+                  id: `sub-${Date.now()}-${chunkIdx}-${i}`,
+                  start: seg.start,
+                  end: seg.end,
+                  originalText: seg.text,
+                  translatedText: tr[i] || seg.text,
+                }));
+              });
+              chunkTransPromises.push(p);
             }
           )
         : await transcribeFileDirectlyWithGroq(
@@ -465,31 +482,34 @@ async function runClientSideAI() {
         throw new Error("Không nhận diện được lời thoại trong video.");
       }
 
-      setAiBanner(
-        true,
-        `Đã nhận diện ${segments.length} câu! Đang dịch song song sang ${state.targetLanguage}...`,
-        "Dịch 6 luồng song song tốc độ cao...",
-        75
-      );
-
-      const origTexts = segments.map((s) => s.text);
-      const translatedTexts = await translateBatch(
-        origTexts,
-        state.targetLanguage,
-        (done, total) => {
+      let subs = [];
+      if (currentPcm16k && chunkTransPromises.length > 0) {
+        setAiBanner(true, `Đang hoàn tất dịch ${segments.length} câu...`, `Đích: ${state.targetLanguage}`, 88);
+        await Promise.all(chunkTransPromises);
+        const sortedKeys = Object.keys(translatedByChunk).map(Number).sort((a, b) => a - b);
+        for (const k of sortedKeys) {
+          subs.push(...translatedByChunk[k]);
+        }
+      } else {
+        setAiBanner(
+          true,
+          `Đã nhận diện ${segments.length} câu! Đang dịch 8 luồng sang ${state.targetLanguage}...`,
+          "Dịch tốc độ cao...",
+          75
+        );
+        const origTexts = segments.map((s) => s.text);
+        const translatedTexts = await translateBatch(origTexts, state.targetLanguage, (done, total) => {
           const pct = Math.round(75 + (done / Math.max(1, total)) * 24);
-          setAiBanner(true, `⚡ AI đang dịch siêu tốc (${done}/${total})...`, `Đích: ${state.targetLanguage}`, pct);
-        },
-        { groqApiKey: state.groqApiKey, style: state.translationStyle }
-      );
-
-      const subs = segments.map((seg, idx) => ({
-        id: `sub-${Date.now()}-${idx}`,
-        start: seg.start,
-        end: seg.end,
-        originalText: seg.text,
-        translatedText: translatedTexts[idx] || seg.text,
-      }));
+          setAiBanner(true, `⚡ AI đang dịch (${done}/${total})...`, `Đích: ${state.targetLanguage}`, pct);
+        });
+        subs = segments.map((seg, idx) => ({
+          id: `sub-${Date.now()}-${idx}`,
+          start: seg.start,
+          end: seg.end,
+          originalText: seg.text,
+          translatedText: translatedTexts[idx] || seg.text,
+        }));
+      }
 
       setSubtitles(subs, true);
       showToast(`⚡ Hoàn tất siêu tốc! Đã tạo & dịch ${subs.length} câu phụ đề.`, "success", 4500);

@@ -151,10 +151,10 @@ export async function transcribeFileDirectlyWithGroq(file, apiKey, sourceLanguag
   return out;
 }
 
-export async function transcribeWithGroqCloud(pcm16k, apiKey, sourceLanguage, onStatus) {
+export async function transcribeWithGroqCloud(pcm16k, apiKey, sourceLanguage, onStatus, onChunkDone) {
   const SAMPLE_RATE = 16000;
-  // 9 minutes per chunk (~17.3MB WAV, safely under Groq's 25MB limit)
-  const CHUNK_SECONDS = 540;
+  // 2 minutes per chunk (~3.8MB WAV): uploads 4x faster on mobile 4G/Wi-Fi and streams results immediately!
+  const CHUNK_SECONDS = 120;
   const CHUNK_SAMPLES = CHUNK_SECONDS * SAMPLE_RATE;
 
   const chunks = [];
@@ -168,13 +168,13 @@ export async function transcribeWithGroqCloud(pcm16k, apiKey, sourceLanguage, on
 
   if (onStatus) {
     onStatus(
-      `Đang gửi ${chunks.length} phần âm thanh lên Groq Cloud (200x tốc độ)...`,
+      `Đang gửi ${chunks.length} đoạn nhỏ lên Groq Cloud (4 luồng song song)...`,
       15
     );
   }
 
   const resultsByChunk = new Array(chunks.length);
-  const CONCURRENCY = 3;
+  const CONCURRENCY = 4;
   let nextIdx = 0;
   let doneCount = 0;
 
@@ -185,9 +185,12 @@ export async function transcribeWithGroqCloud(pcm16k, apiKey, sourceLanguage, on
       const segs = await transcribeChunkGroq(ch.slice, ch.offsetSec, apiKey, sourceLanguage);
       resultsByChunk[idx] = segs;
       doneCount++;
+      if (onChunkDone) {
+        onChunkDone(idx, segs, doneCount, chunks.length);
+      }
       if (onStatus) {
-        const pct = Math.round(15 + (doneCount / chunks.length) * 55);
-        onStatus(`Groq Cloud đã nhận diện ${doneCount}/${chunks.length} đoạn video...`, pct);
+        const pct = Math.round(15 + (doneCount / chunks.length) * 60);
+        onStatus(`Groq Cloud đã nhận diện ${doneCount}/${chunks.length} đoạn...`, pct);
       }
     }
   }
