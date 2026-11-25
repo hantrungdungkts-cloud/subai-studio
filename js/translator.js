@@ -1,6 +1,4 @@
-// Ultra-Fast Client-Side Translation:
-// 1. Groq Llama-3.1-8B-Instant (~1000 tok/s, 60 lines/batch, 4 concurrent = <1s for whole video!)
-// 2. Fallback: 8-way parallel Google GTX batching + Cache + MyMemory
+// Ultra-Fast Client-Side Translation (8-way parallel Google GTX batching + Cache + MyMemory fallback)
 
 const TARGET_LANG_CODES = {
   "Tiếng Việt": "vi",
@@ -45,65 +43,6 @@ async function translateViaMyMemory(text, targetCode) {
   const translated = data?.responseData?.translatedText;
   if (!translated) throw new Error("Empty MyMemory response");
   return translated;
-}
-
-async function translateBatchViaGroqLLM(batchItems, targetLanguage, groqApiKey, style) {
-  const payload = batchItems.map((it, idx) => `${idx}|${it.text}`).join("\n");
-  const styleNote =
-    style === "cinema"
-      ? "natural cinematic movie subtitle style"
-      : style === "casual"
-      ? "friendly casual conversational style"
-      : style === "formal"
-      ? "polite formal style"
-      : "natural fluent subtitle style";
-
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${groqApiKey.trim()}`,
-    },
-    body: JSON.stringify({
-      model: "llama-3.1-8b-instant",
-      temperature: 0.2,
-      messages: [
-        {
-          role: "system",
-          content: `You are an expert subtitle translator. Translate each line to ${targetLanguage} in ${styleNote}. Input format is "index|text". Output ONLY the exact same number of lines in "index|translated_text" format, no extra commentary.`,
-        },
-        {
-          role: "user",
-          content: payload,
-        },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Groq LLM HTTP ${res.status}`);
-  }
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content || "";
-  const out = new Array(batchItems.length).fill(null);
-  const lines = content.split(/\r?\n/);
-
-  for (const line of lines) {
-    const sepIdx = line.indexOf("|");
-    if (sepIdx === -1) continue;
-    const idxNum = parseInt(line.slice(0, sepIdx).trim(), 10);
-    if (!Number.isNaN(idxNum) && idxNum >= 0 && idxNum < batchItems.length) {
-      const val = line.slice(sepIdx + 1).trim();
-      if (val) out[idxNum] = val;
-    }
-  }
-
-  // Require at least 85% parsed lines to accept batch
-  const validCount = out.filter((x) => x !== null).length;
-  if (validCount < Math.ceil(batchItems.length * 0.85)) {
-    throw new Error("Groq LLM batch line mismatch");
-  }
-  return out.map((v, idx) => v || batchItems[idx].text);
 }
 
 export async function translateSingleLine(text, targetLanguage) {
@@ -157,10 +96,8 @@ function buildBatches(lines, code, maxLines, maxChars) {
   return batches;
 }
 
-export async function translateBatch(lines, targetLanguage, onProgress, options = {}) {
+export async function translateBatch(lines, targetLanguage, onProgress) {
   const code = getLangCode(targetLanguage);
-  const groqApiKey = (options.groqApiKey || "").trim();
-  const style = options.style || "natural";
   const results = new Array(lines.length).fill("");
   let completedCount = 0;
 
@@ -182,32 +119,21 @@ export async function translateBatch(lines, targetLanguage, onProgress, options 
     onProgress(completedCount, lines.length);
   }
 
-  const useGroq = Boolean(groqApiKey);
-  const batches = buildBatches(lines, code, useGroq ? 60 : 30, useGroq ? 3500 : 1700);
-  const CONCURRENCY = useGroq ? 4 : 8;
+  const batches = buildBatches(lines, code, 30, 1700);
+  const CONCURRENCY = 8;
   let nextBatchIdx = 0;
 
   async function processBatch(batch) {
+    const joined = batch.map((item) => item.text).join("\n");
     let translatedLines = null;
 
-    if (useGroq) {
-      try {
-        translatedLines = await translateBatchViaGroqLLM(batch, targetLanguage, groqApiKey, style);
-      } catch {
-        // Fallback to GTX if Groq rate-limited
+    try {
+      const translatedJoined = await translateViaGTX(joined, code);
+      const parts = translatedJoined.split(/\r?\n/).map((p) => p.trim());
+      if (parts.length === batch.length) {
+        translatedLines = parts;
       }
-    }
-
-    if (!translatedLines) {
-      const joined = batch.map((item) => item.text).join("\n");
-      try {
-        const translatedJoined = await translateViaGTX(joined, code);
-        const parts = translatedJoined.split(/\r?\n/).map((p) => p.trim());
-        if (parts.length === batch.length) {
-          translatedLines = parts;
-        }
-      } catch {}
-    }
+    } catch {}
 
     if (!translatedLines) {
       translatedLines = await Promise.all(
