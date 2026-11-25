@@ -8,7 +8,7 @@ import { initSubtitleEditor } from "./editor.js";
 import { initStylePanel } from "./styles.js";
 import { extractAudioAndPeaks } from "./audio-utils.js";
 import { translateBatch } from "./translator.js";
-import { transcribeWithGroqCloud } from "./groq-ai.js";
+import { transcribeWithGroqCloud, transcribeFileDirectlyWithGroq } from "./groq-ai.js";
 import {
   saveProjectLocal,
   listProjectsLocal,
@@ -18,6 +18,7 @@ import {
 import { triggerDownloadSubtitle, parseSrtOrVtt } from "./exporter.js";
 
 let currentPcm16k = null;
+let currentVideoFile = null;
 let currentVideoObjectUrl = null;
 let whisperWorker = null;
 let isGenerating = false;
@@ -221,6 +222,7 @@ async function handleVideoFile(file) {
   progressSub.textContent = "Không cần tải lên server — xử lý siêu tốc ngay trên trình duyệt";
 
   try {
+    currentVideoFile = file;
     if (currentVideoObjectUrl) {
       URL.revokeObjectURL(currentVideoObjectUrl);
     }
@@ -414,8 +416,11 @@ function runWhisperWorkerChunk(audioSlice, modelKey, sourceLanguage, onStatus) {
 
 async function runClientSideAI() {
   if (!state.video || isGenerating) return;
-  if (!currentPcm16k) {
-    showToast("Video chưa có dữ liệu âm thanh 16kHz. Vui lòng chọn lại file video MP4/WebM.", "error", 5000);
+  const useGroq = Boolean(state.groqApiKey && state.groqApiKey.trim());
+  const canDirectGroq = !currentPcm16k && useGroq && currentVideoFile && currentVideoFile.size <= 24 * 1024 * 1024;
+
+  if (!currentPcm16k && !canDirectGroq) {
+    showToast("Video chưa giải mã được âm thanh 16kHz (thử cập nhật APK mới nhất hoặc file MP4 chuẩn AAC).", "error", 5500);
     return;
   }
 
@@ -424,8 +429,6 @@ async function runClientSideAI() {
   const btnRetranslate = document.getElementById("btnRetranslate");
   btnGenerateAI.disabled = true;
   btnRetranslate.disabled = true;
-
-  const useGroq = Boolean(state.groqApiKey && state.groqApiKey.trim());
 
   try {
     if (useGroq) {
@@ -436,14 +439,23 @@ async function runClientSideAI() {
         10
       );
 
-      const segments = await transcribeWithGroqCloud(
-        currentPcm16k,
-        state.groqApiKey,
-        state.sourceLanguage,
-        (msg, pct) => {
-          setAiBanner(true, "⚡ Groq Cloud đang nhận diện giọng nói...", msg, pct);
-        }
-      );
+      const segments = currentPcm16k
+        ? await transcribeWithGroqCloud(
+            currentPcm16k,
+            state.groqApiKey,
+            state.sourceLanguage,
+            (msg, pct) => {
+              setAiBanner(true, "⚡ Groq Cloud đang nhận diện giọng nói...", msg, pct);
+            }
+          )
+        : await transcribeFileDirectlyWithGroq(
+            currentVideoFile,
+            state.groqApiKey,
+            state.sourceLanguage,
+            (msg, pct) => {
+              setAiBanner(true, "⚡ Groq Cloud đang nhận diện trực tiếp...", msg, pct);
+            }
+          );
 
       if (!isGenerating) return;
       if (!segments.length) {

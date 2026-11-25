@@ -102,6 +102,55 @@ async function transcribeChunkGroq(pcmSlice, offsetSeconds, apiKey, sourceLangua
   return out;
 }
 
+export async function transcribeFileDirectlyWithGroq(file, apiKey, sourceLanguage, onStatus) {
+  if (onStatus) {
+    onStatus(`Đang gửi trực tiếp "${file.name}" lên Groq Cloud...`, 25);
+  }
+  const form = new FormData();
+  form.append("file", file, file.name || "video.mp4");
+  form.append("model", "whisper-large-v3-turbo");
+  form.append("response_format", "verbose_json");
+  form.append("temperature", "0");
+
+  const iso = GROQ_LANG_ISO[sourceLanguage] || "";
+  if (iso) {
+    form.append("language", iso);
+  }
+
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey.trim()}`,
+    },
+    body: form,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    let msg = `Groq API lỗi (${res.status})`;
+    try {
+      const parsed = JSON.parse(errText);
+      if (parsed?.error?.message) msg = `Groq API: ${parsed.error.message}`;
+    } catch {}
+    throw new Error(msg);
+  }
+
+  const data = await res.json();
+  const rawSegs = Array.isArray(data.segments) ? data.segments : [];
+  const out = [];
+  for (const s of rawSegs) {
+    const text = (s.text || "").trim();
+    if (!text) continue;
+    const start = Number((Number(s.start) || 0).toFixed(3));
+    const end = Number(Math.max(start + 0.3, Number(s.end) || 0).toFixed(3));
+    out.push({ start, end, text });
+  }
+  if (!out.length && data.text?.trim()) {
+    out.push({ start: 0, end: 5, text: data.text.trim() });
+  }
+  return out;
+}
+
 export async function transcribeWithGroqCloud(pcm16k, apiKey, sourceLanguage, onStatus) {
   const SAMPLE_RATE = 16000;
   // 9 minutes per chunk (~17.3MB WAV, safely under Groq's 25MB limit)
