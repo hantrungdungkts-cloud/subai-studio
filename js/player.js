@@ -1,6 +1,14 @@
 // Video player controls & accurate real-time bilingual subtitle overlay
 
 import { state, on, emit, formatTimeShort, updateStyle } from "./state.js";
+import {
+  toggleDubbing,
+  stopDubbing,
+  resetDubbingState,
+  onSubtitleTick,
+  setSavedUserVolume,
+  syncDubbingButtons,
+} from "./dubbing.js";
 
 let videoEl;
 let subtitleOverlay;
@@ -29,6 +37,7 @@ export function initPlayer() {
   iconPause = document.getElementById("iconPause");
 
   const btnPlayPause = document.getElementById("btnPlayPause");
+  const btnToggleDubbing = document.getElementById("btnToggleDubbing");
   const btnSkipBack = document.getElementById("btnSkipBack");
   const btnSkipFwd = document.getElementById("btnSkipFwd");
   const playbackRateSelect = document.getElementById("playbackRateSelect");
@@ -40,6 +49,11 @@ export function initPlayer() {
 
   btnPlayPause.addEventListener("click", togglePlay);
   initFullscreenGestures();
+
+  if (btnToggleDubbing) {
+    btnToggleDubbing.addEventListener("click", () => toggleDubbing(videoEl));
+  }
+  syncDubbingButtons();
 
   if (btnRotateScreen) {
     btnRotateScreen.addEventListener("click", rotateScreen);
@@ -59,8 +73,10 @@ export function initPlayer() {
   });
 
   volumeSlider.addEventListener("input", () => {
-    videoEl.volume = parseFloat(volumeSlider.value);
-    videoEl.muted = videoEl.volume === 0;
+    const v = parseFloat(volumeSlider.value);
+    videoEl.volume = v;
+    videoEl.muted = v === 0;
+    setSavedUserVolume(v);
   });
 
   btnMute.addEventListener("click", () => {
@@ -86,6 +102,7 @@ export function initPlayer() {
     iconPlay.hidden = false;
     iconPause.hidden = true;
     stopTick();
+    stopDubbing(videoEl);
     syncTimeUI();
   });
 
@@ -137,6 +154,8 @@ export function initPlayer() {
   });
 
   on("video:loaded", (video) => {
+    stopDubbing(videoEl);
+    resetDubbingState();
     const src = video.videoUrl || video.mediaUrl || "";
     if (src) {
       videoEl.src = src;
@@ -214,6 +233,8 @@ export function seekTo(seconds) {
   videoEl.currentTime = clamped;
   state.currentTime = clamped;
   currentTimeLabel.textContent = formatTimeShort(clamped);
+  stopDubbing(videoEl);
+  resetDubbingState();
   emit("time:tick", clamped);
   renderOverlay();
 }
@@ -222,6 +243,7 @@ export function renderOverlay() {
   if (!subtitleOverlay || !subtitleCue || !videoEl) return;
   const t = state.currentTime;
   const active = state.subtitles.find((s) => t >= s.start && t <= s.end);
+  onSubtitleTick(active, videoEl);
 
   if (!active) {
     subtitleCue.hidden = true;
@@ -390,6 +412,7 @@ function initFullscreenGestures() {
 
   const floatingBar = document.getElementById("fsFloatingBar");
   const fsBtnPlayPause = document.getElementById("fsBtnPlayPause");
+  const fsBtnDubbing = document.getElementById("fsBtnDubbing");
   const fsSeekSlider = document.getElementById("fsSeekSlider");
   const fsTimeCurrent = document.getElementById("fsTimeCurrent");
   const fsTimeDuration = document.getElementById("fsTimeDuration");
@@ -467,6 +490,13 @@ function initFullscreenGestures() {
     fsBtnPlayPause.addEventListener("click", (e) => {
       e.stopPropagation();
       togglePlay();
+      showFloatingBarTemporarily();
+    });
+  }
+  if (fsBtnDubbing) {
+    fsBtnDubbing.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleDubbing(videoEl);
       showFloatingBarTemporarily();
     });
   }
