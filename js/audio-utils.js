@@ -61,6 +61,39 @@ async function decodeBufferToAudio(arrayBuffer) {
   }
 }
 
+function parseWav16kToFloat32(wavBuf) {
+  if (!wavBuf || wavBuf.byteLength <= 44) return null;
+  const view = new DataView(wavBuf);
+  const sampleRate = view.getUint32(24, true);
+  const bits = view.getUint16(34, true);
+  if (sampleRate !== 16000 || bits !== 16) return null;
+  const numSamples = Math.floor((wavBuf.byteLength - 44) / 2);
+  const int16 = new Int16Array(wavBuf, 44, numSamples);
+  const pcm16k = new Float32Array(numSamples);
+  const inv = 1 / 32768;
+  for (let i = 0; i < numSamples; i++) {
+    pcm16k[i] = int16[i] * inv;
+  }
+  return { pcm16k, duration: numSamples / 16000 };
+}
+
+function computePeaks(pcm16k) {
+  const numPeaks = 400;
+  const blockSize = Math.max(1, Math.floor(pcm16k.length / numPeaks));
+  const peaks = [];
+  for (let i = 0; i < numPeaks; i++) {
+    let maxVal = 0;
+    const start = i * blockSize;
+    const end = Math.min(pcm16k.length, start + blockSize);
+    for (let j = start; j < end; j += Math.max(1, Math.floor(blockSize / 32))) {
+      const v = Math.abs(pcm16k[j]);
+      if (v > maxVal) maxVal = v;
+    }
+    peaks.push(Number(Math.min(1, maxVal * 1.15).toFixed(3)));
+  }
+  return peaks;
+}
+
 export async function extractAudioAndPeaks(file, onProgress) {
   let audioBuffer = null;
 
@@ -72,7 +105,11 @@ export async function extractAudioAndPeaks(file, onProgress) {
     if (onProgress) onProgress(25, "Đang tách âm thanh bằng phần cứng Android...");
     try {
       const wavBuf = await extractViaAndroidNative();
-      if (onProgress) onProgress(60, "Đang nạp luồng âm thanh 16kHz...");
+      const parsed = parseWav16kToFloat32(wavBuf);
+      if (parsed) {
+        if (onProgress) onProgress(100, "Sẵn sàng!");
+        return { pcm16k: parsed.pcm16k, peaks: computePeaks(parsed.pcm16k), duration: parsed.duration };
+      }
       audioBuffer = await decodeBufferToAudio(wavBuf);
     } catch (nativeErr) {
       console.warn("Native large-file audio extraction failed, trying Web Audio:", nativeErr);
@@ -89,6 +126,11 @@ export async function extractAudioAndPeaks(file, onProgress) {
       if (hasNative && !preferNativeFirst) {
         if (onProgress) onProgress(50, "Đang dùng bộ giải mã phần cứng Android cho video này...");
         const wavBuf = await extractViaAndroidNative();
+        const parsed = parseWav16kToFloat32(wavBuf);
+        if (parsed) {
+          if (onProgress) onProgress(100, "Sẵn sàng!");
+          return { pcm16k: parsed.pcm16k, peaks: computePeaks(parsed.pcm16k), duration: parsed.duration };
+        }
         audioBuffer = await decodeBufferToAudio(wavBuf);
       } else {
         throw new Error(
