@@ -64,9 +64,9 @@ async function decodeBufferToAudio(arrayBuffer) {
 export async function extractAudioAndPeaks(file, onProgress) {
   let audioBuffer = null;
 
-  // On Android APK, for large files (> 80MB) or unsupported codecs, native MediaCodec is faster & uses <5MB RAM
+  // On Android APK, for files (> 25MB) or unsupported codecs, native MediaCodec is faster & uses <5MB RAM
   const hasNative = Boolean(window.AndroidNative?.extractAudio16kAsync);
-  const preferNativeFirst = hasNative && file.size > 80 * 1024 * 1024;
+  const preferNativeFirst = hasNative && file.size > 25 * 1024 * 1024;
 
   if (preferNativeFirst) {
     if (onProgress) onProgress(25, "Đang tách âm thanh bằng phần cứng Android...");

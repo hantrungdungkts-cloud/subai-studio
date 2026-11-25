@@ -18,6 +18,7 @@ import {
 import { triggerDownloadSubtitle, parseSrtOrVtt } from "./exporter.js";
 
 let currentPcm16k = null;
+let pendingAudioPromise = null;
 let currentVideoFile = null;
 let currentVideoObjectUrl = null;
 let whisperWorker = null;
@@ -223,54 +224,23 @@ async function handleVideoFile(file) {
 
   try {
     currentVideoFile = file;
+    currentPcm16k = null;
     if (currentVideoObjectUrl) {
       URL.revokeObjectURL(currentVideoObjectUrl);
     }
     currentVideoObjectUrl = URL.createObjectURL(file);
 
-    // Extract audio + waveform peaks client-side
-    let peaks = [];
-    let duration = 0;
-    try {
-      const audioData = await extractAudioAndPeaks(file, (pct, msg) => {
-        progressBar.style.width = `${pct}%`;
-        progressSub.textContent = msg;
-      });
-      currentPcm16k = audioData.pcm16k;
-      peaks = audioData.peaks;
-      duration = audioData.duration;
-    } catch (audioErr) {
-      console.warn("Audio decode warning:", audioErr);
-      currentPcm16k = null;
-    }
-
-    // Ensure we get exact duration from <video> tag even if audio decode failed
-    if (!duration || duration <= 0) {
-      await new Promise((resolve) => {
-        const tempVideo = document.createElement("video");
-        tempVideo.preload = "metadata";
-        tempVideo.src = currentVideoObjectUrl;
-        tempVideo.onloadedmetadata = () => {
-          if (tempVideo.duration && isFinite(tempVideo.duration)) {
-            duration = tempVideo.duration;
-          }
-          resolve();
-        };
-        tempVideo.onerror = () => resolve();
-        setTimeout(resolve, 2000);
-      });
-    }
-
+    // Show video player INSTANTLY (< 0.1s) without waiting for audio extraction
     const videoId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     state.video = {
       videoId,
       filename: file.name,
       videoUrl: currentVideoObjectUrl,
       mediaUrl: currentVideoObjectUrl,
-      duration: duration || 0,
+      duration: 0,
       width: 1280,
       height: 720,
-      peaks,
+      peaks: [],
     };
 
     document.getElementById("videoFileName").textContent = file.name;
@@ -286,7 +256,29 @@ async function handleVideoFile(file) {
 
     setSubtitles([], false);
     emit("video:loaded", state.video);
-    showToast(`Đã mở video "${file.name}". Nhấn "Tạo & Dịch Phụ Đề AI" để bắt đầu!`, "success");
+    showToast(`⚡ Đã mở video "${file.name}" tức thì! Bấm "Tạo & Dịch Phụ Đề AI" bất cứ lúc nào.`, "success", 3500);
+
+    // Extract 16kHz audio + waveform peaks asynchronously in the background
+    pendingAudioPromise = extractAudioAndPeaks(file, () => {})
+      .then((audioData) => {
+        if (currentVideoFile !== file) return;
+        currentPcm16k = audioData.pcm16k;
+        if (state.video && state.video.videoId === videoId) {
+          state.video.peaks = audioData.peaks || [];
+          if (!state.video.duration && audioData.duration) {
+            state.video.duration = audioData.duration;
+          }
+          emit("subtitles:change");
+        }
+      })
+      .catch((audioErr) => {
+        console.warn("Background audio decode warning:", audioErr);
+        if (currentVideoFile === file) currentPcm16k = null;
+      })
+      .finally(() => {
+        if (currentVideoFile === file) pendingAudioPromise = null;
+      });
+    return;
   } catch (err) {
     dropCard.hidden = false;
     progressCard.hidden = true;
@@ -417,18 +409,29 @@ function runWhisperWorkerChunk(audioSlice, modelKey, sourceLanguage, onStatus) {
 async function runClientSideAI() {
   if (!state.video || isGenerating) return;
   const useGroq = Boolean(state.groqApiKey && state.groqApiKey.trim());
-  const canDirectGroq = !currentPcm16k && useGroq && currentVideoFile && currentVideoFile.size <= 24 * 1024 * 1024;
-
-  if (!currentPcm16k && !canDirectGroq) {
-    showToast("Video chưa giải mã được âm thanh 16kHz (thử cập nhật APK mới nhất hoặc file MP4 chuẩn AAC).", "error", 5500);
-    return;
-  }
 
   isGenerating = true;
   const btnGenerateAI = document.getElementById("btnGenerateAI");
   const btnRetranslate = document.getElementById("btnRetranslate");
   btnGenerateAI.disabled = true;
   btnRetranslate.disabled = true;
+
+  if (!currentPcm16k && pendingAudioPromise) {
+    setAiBanner(true, "Đang hoàn tất tách âm thanh từ video...", "Đợi một chút là xong...", 8);
+    try {
+      await pendingAudioPromise;
+    } catch {}
+  }
+
+  const canDirectGroq = !currentPcm16k && useGroq && currentVideoFile && currentVideoFile.size <= 24 * 1024 * 1024;
+  if (!currentPcm16k && !canDirectGroq) {
+    isGenerating = false;
+    setAiBanner(false);
+    btnGenerateAI.disabled = !state.video;
+    btnRetranslate.disabled = state.subtitles.length === 0;
+    showToast("Video chưa giải mã được âm thanh 16kHz (thử cập nhật APK mới nhất hoặc file MP4 chuẩn AAC).", "error", 5500);
+    return;
+  }
 
   try {
     if (useGroq) {
@@ -470,10 +473,15 @@ async function runClientSideAI() {
       );
 
       const origTexts = segments.map((s) => s.text);
-      const translatedTexts = await translateBatch(origTexts, state.targetLanguage, (done, total) => {
-        const pct = Math.round(75 + (done / Math.max(1, total)) * 24);
-        setAiBanner(true, `Đang dịch phụ đề (${done}/${total})...`, `Đích: ${state.targetLanguage}`, pct);
-      });
+      const translatedTexts = await translateBatch(
+        origTexts,
+        state.targetLanguage,
+        (done, total) => {
+          const pct = Math.round(75 + (done / Math.max(1, total)) * 24);
+          setAiBanner(true, `⚡ AI đang dịch siêu tốc (${done}/${total})...`, `Đích: ${state.targetLanguage}`, pct);
+        },
+        { groqApiKey: state.groqApiKey, style: state.translationStyle }
+      );
 
       const subs = segments.map((seg, idx) => ({
         id: `sub-${Date.now()}-${idx}`,
@@ -628,10 +636,15 @@ async function runRetranslateAll() {
   setAiBanner(true, `Đang dịch lại ${state.subtitles.length} câu sang ${state.targetLanguage}...`, "Dịch tự động miễn phí...", 15);
   try {
     const origs = state.subtitles.map((s) => s.originalText || s.translatedText);
-    const translated = await translateBatch(origs, state.targetLanguage, (done, total) => {
-      const pct = Math.round(15 + (done / Math.max(1, total)) * 84);
-      setAiBanner(true, `Đang dịch lại (${done}/${total})...`, `Ngôn ngữ đích: ${state.targetLanguage}`, pct);
-    });
+    const translated = await translateBatch(
+      origs,
+      state.targetLanguage,
+      (done, total) => {
+        const pct = Math.round(15 + (done / Math.max(1, total)) * 84);
+        setAiBanner(true, `⚡ Đang dịch lại (${done}/${total})...`, `Ngôn ngữ đích: ${state.targetLanguage}`, pct);
+      },
+      { groqApiKey: state.groqApiKey, style: state.translationStyle }
+    );
     const updated = state.subtitles.map((s, idx) => ({
       ...s,
       translatedText: translated[idx] || s.translatedText,
