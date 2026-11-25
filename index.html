@@ -528,12 +528,22 @@
         </div>
 
         <div class="field-group" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(148,163,184,0.2);">
-          <label for="inputGroqKey">⚡ Tăng tốc Siêu Tốc cho Video Dài — Groq API Key (Miễn phí, tùy chọn)</label>
-          <input type="password" id="inputGroqKey" class="full-select" placeholder="gsk_... (Để trống nếu dùng AI trên máy)" autocomplete="off" />
+          <label for="inputGroqKey">⚡ Tăng tốc Siêu Tốc — Groq API Key (Có thể dán nhiều Key cách nhau dấu phẩy)</label>
+          <input type="password" id="inputGroqKey" class="full-select" placeholder="gsk_... (Hỗ trợ nhiều key tự xoay vòng khi hết lượt)" autocomplete="off" />
           <p class="section-desc" style="margin-top: 6px; font-size: 12px;">
-            Video dài 30–60 phút xử lý trên chip điện thoại sẽ chậm. Nếu bạn dán Key miễn phí từ
-            <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color: #38bdf8; text-decoration: underline;">console.groq.com/keys</a>,
-            AI sẽ chạy trên Cloud tốc độ <strong>200x (chỉ ~5–15 giây cho cả video dài)</strong>.
+            Tạo Key miễn phí tại
+            <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color: #38bdf8; text-decoration: underline;">console.groq.com/keys</a>.
+            App tự động cắt bỏ khoảng lặng để tiết kiệm 30–50% lượt dùng Groq.
+          </p>
+        </div>
+
+        <div class="field-group" style="margin-top: 10px;">
+          <label for="inputGeminiKey">✨ Dự phòng / Thay thế Groq — Google Gemini API Key (Miễn phí)</label>
+          <input type="password" id="inputGeminiKey" class="full-select" placeholder="AIza... (Lấy miễn phí tại aistudio.google.com/apikey)" autocomplete="off" />
+          <p class="section-desc" style="margin-top: 6px; font-size: 12px;">
+            Nếu Groq hết lượt theo giờ/ngày, App tự động chuyển sang
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color: #38bdf8; text-decoration: underline;">Gemini Flash miễn phí</a>
+            (hoặc chạy AI ngay trên máy).
           </p>
         </div>
       </div>
