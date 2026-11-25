@@ -39,7 +39,7 @@ export function initPlayer() {
   const btnFullscreen = document.getElementById("btnFullscreen");
 
   btnPlayPause.addEventListener("click", togglePlay);
-  videoEl.addEventListener("click", togglePlay);
+  initFullscreenGestures();
 
   if (btnRotateScreen) {
     btnRotateScreen.addEventListener("click", rotateScreen);
@@ -359,8 +359,310 @@ function updateFullscreenUI() {
   const enterIcon = document.getElementById("iconEnterFullscreen");
   const exitIcon = document.getElementById("iconExitFullscreen");
   const box = document.getElementById("videoBox");
+  const floatingBar = document.getElementById("fsFloatingBar");
+  const dimOverlay = document.getElementById("fsDimOverlay");
+
   if (enterIcon) enterIcon.hidden = isFs;
   if (exitIcon) exitIcon.hidden = !isFs;
   if (box) box.classList.toggle("is-fullscreen", isFs);
+  if (floatingBar) floatingBar.hidden = !isFs;
+
+  if (!isFs) {
+    if (dimOverlay) dimOverlay.style.opacity = "0";
+    if (window.AndroidNative?.setScreenBrightness) {
+      try {
+        window.AndroidNative.setScreenBrightness(-1);
+      } catch {}
+    }
+  }
   renderOverlay();
+}
+
+function initFullscreenGestures() {
+  const box = document.getElementById("videoBox");
+  const hud = document.getElementById("fsGestureHud");
+  const hudIcon = document.getElementById("fsHudIcon");
+  const hudText = document.getElementById("fsHudText");
+  const hudSub = document.getElementById("fsHudSub");
+  const hudBarWrap = document.getElementById("fsHudBarWrap");
+  const hudBarFill = document.getElementById("fsHudBarFill");
+  const dimOverlay = document.getElementById("fsDimOverlay");
+
+  const floatingBar = document.getElementById("fsFloatingBar");
+  const fsBtnPlayPause = document.getElementById("fsBtnPlayPause");
+  const fsSeekSlider = document.getElementById("fsSeekSlider");
+  const fsTimeCurrent = document.getElementById("fsTimeCurrent");
+  const fsTimeDuration = document.getElementById("fsTimeDuration");
+  const fsBtnExit = document.getElementById("fsBtnExit");
+
+  if (!box || !videoEl) return;
+
+  let brightness = 1.0; // 0.1 to 1.0
+  let hudTimer = null;
+  let barHideTimer = null;
+
+  function showHud(icon, text, sub, pct) {
+    if (!hud) return;
+    hud.hidden = false;
+    if (hudIcon) hudIcon.textContent = icon;
+    if (hudText) hudText.textContent = text;
+    if (hudSub) {
+      if (sub) {
+        hudSub.textContent = sub;
+        hudSub.hidden = false;
+      } else {
+        hudSub.hidden = true;
+      }
+    }
+    if (hudBarWrap && hudBarFill) {
+      if (typeof pct === "number") {
+        hudBarWrap.hidden = false;
+        hudBarFill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+      } else {
+        hudBarWrap.hidden = true;
+      }
+    }
+    clearTimeout(hudTimer);
+    hudTimer = setTimeout(() => {
+      if (hud) hud.hidden = true;
+    }, 900);
+  }
+
+  function showFloatingBarTemporarily() {
+    if (!floatingBar) return;
+    const isFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+    if (!isFs) {
+      floatingBar.hidden = true;
+      return;
+    }
+    floatingBar.hidden = false;
+    clearTimeout(barHideTimer);
+    barHideTimer = setTimeout(() => {
+      if (floatingBar && !videoEl.paused) {
+        floatingBar.hidden = true;
+      }
+    }, 3500);
+  }
+
+  // Sync floating bar with video playback
+  videoEl.addEventListener("timeupdate", () => {
+    const dur = videoEl.duration || state.video?.duration || 0;
+    const cur = videoEl.currentTime || 0;
+    if (fsTimeCurrent) fsTimeCurrent.textContent = formatTimeShort(cur).split(".")[0];
+    if (fsTimeDuration) fsTimeDuration.textContent = formatTimeShort(dur).split(".")[0];
+    if (fsSeekSlider && dur > 0 && !fsSeekSlider.dataset.dragging) {
+      fsSeekSlider.max = String(dur);
+      fsSeekSlider.value = String(cur);
+    }
+  });
+
+  videoEl.addEventListener("play", () => {
+    if (fsBtnPlayPause) fsBtnPlayPause.textContent = "⏸";
+  });
+  videoEl.addEventListener("pause", () => {
+    if (fsBtnPlayPause) fsBtnPlayPause.textContent = "⏯";
+  });
+
+  if (fsBtnPlayPause) {
+    fsBtnPlayPause.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePlay();
+      showFloatingBarTemporarily();
+    });
+  }
+  if (fsBtnExit) {
+    fsBtnExit.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleFullscreen();
+    });
+  }
+  if (fsSeekSlider) {
+    fsSeekSlider.addEventListener("touchstart", (e) => {
+      e.stopPropagation();
+      fsSeekSlider.dataset.dragging = "1";
+    }, { passive: true });
+    fsSeekSlider.addEventListener("input", (e) => {
+      e.stopPropagation();
+      const val = parseFloat(fsSeekSlider.value) || 0;
+      seekTo(val);
+      showFloatingBarTemporarily();
+    });
+    fsSeekSlider.addEventListener("touchend", () => {
+      delete fsSeekSlider.dataset.dragging;
+    });
+    fsSeekSlider.addEventListener("change", () => {
+      delete fsSeekSlider.dataset.dragging;
+    });
+  }
+
+  // Touch gesture state (Swipe Left/Right = Seek, Left Vertical = Brightness, Right Vertical = Volume)
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let gestureMode = null; // null | "seek" | "brightness" | "volume"
+  let startTime = 0;
+  let pendingSeekTime = 0;
+  let startBrightness = 1.0;
+  let startVolume = 1.0;
+  let lastTapTime = 0;
+  let lastTapX = 0;
+  let singleTapTimer = null;
+
+  box.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.target.closest("#fsFloatingBar")) return;
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      touchStartX = t.clientX;
+      touchStartY = t.clientY;
+      gestureMode = null;
+      startTime = videoEl.currentTime || 0;
+      pendingSeekTime = startTime;
+      startBrightness = brightness;
+      startVolume =
+        typeof window.AndroidNative?.getMediaVolume === "function"
+          ? window.AndroidNative.getMediaVolume()
+          : videoEl.volume ?? 1;
+    },
+    { passive: true }
+  );
+
+  box.addEventListener(
+    "touchmove",
+    (e) => {
+      if (e.target.closest("#fsFloatingBar")) return;
+      if (e.touches.length !== 1) return;
+
+      const isFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+      // Enable swipe gestures in Fullscreen mode (or horizontally anywhere when video is loaded)
+      const t = e.touches[0];
+      const dx = t.clientX - touchStartX;
+      const dy = t.clientY - touchStartY;
+
+      if (!gestureMode) {
+        if (Math.abs(dx) < 14 && Math.abs(dy) < 14) return;
+        const rect = box.getBoundingClientRect();
+        const relX = (touchStartX - rect.left) / Math.max(1, rect.width);
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+          gestureMode = "seek";
+        } else if (isFs) {
+          gestureMode = relX < 0.5 ? "brightness" : "volume";
+        } else {
+          return; // Allow normal page scroll outside fullscreen for vertical swipes
+        }
+      }
+
+      if (e.cancelable) e.preventDefault();
+
+      const rect = box.getBoundingClientRect();
+      const w = Math.max(1, rect.width);
+      const h = Math.max(1, rect.height);
+
+      if (gestureMode === "seek") {
+        const dur = videoEl.duration || state.video?.duration || 0;
+        if (dur <= 0) return;
+        const maxSpan = Math.min(180, Math.max(45, dur * 0.45));
+        const deltaSec = (dx / w) * maxSpan;
+        pendingSeekTime = Math.max(0, Math.min(dur, startTime + deltaSec));
+        const sign = deltaSec >= 0 ? "+" : "";
+        const icon = deltaSec >= 0 ? "⏩" : "⏪";
+        const pct = (pendingSeekTime / dur) * 100;
+        showHud(
+          icon,
+          `${sign}${Math.round(deltaSec)} giây`,
+          `${formatTimeShort(pendingSeekTime).split(".")[0]} / ${formatTimeShort(dur).split(".")[0]}`,
+          pct
+        );
+      } else if (gestureMode === "brightness") {
+        const delta = -dy / (h * 0.65);
+        brightness = Math.max(0.1, Math.min(1.0, startBrightness + delta));
+        if (window.AndroidNative?.setScreenBrightness) {
+          try {
+            window.AndroidNative.setScreenBrightness(brightness);
+          } catch {}
+        }
+        if (dimOverlay) {
+          dimOverlay.style.opacity = String(Math.max(0, 1 - brightness) * 0.85);
+        }
+        const pct = Math.round(brightness * 100);
+        showHud("☀️", `Độ sáng: ${pct}%`, null, pct);
+      } else if (gestureMode === "volume") {
+        const delta = -dy / (h * 0.65);
+        const newVol = Math.max(0, Math.min(1, startVolume + delta));
+        videoEl.volume = newVol;
+        videoEl.muted = newVol === 0;
+        const volSlider = document.getElementById("volumeSlider");
+        if (volSlider) volSlider.value = String(newVol);
+        if (window.AndroidNative?.setMediaVolume) {
+          try {
+            window.AndroidNative.setMediaVolume(newVol);
+          } catch {}
+        }
+        const pct = Math.round(newVol * 100);
+        showHud(pct === 0 ? "🔇" : pct < 40 ? "🔉" : "🔊", `Âm lượng: ${pct}%`, null, pct);
+      }
+    },
+    { passive: false }
+  );
+
+  box.addEventListener("touchend", (e) => {
+    if (e.target.closest("#fsFloatingBar")) return;
+
+    if (gestureMode === "seek") {
+      seekTo(pendingSeekTime);
+      gestureMode = null;
+      return;
+    }
+    if (gestureMode) {
+      gestureMode = null;
+      return;
+    }
+
+    // Handle single tap vs double tap
+    const now = Date.now();
+    const rect = box.getBoundingClientRect();
+    const tapX = (e.changedTouches?.[0]?.clientX ?? touchStartX) - rect.left;
+    const relX = tapX / Math.max(1, rect.width);
+
+    if (now - lastTapTime < 280 && Math.abs(tapX - lastTapX) < 80) {
+      clearTimeout(singleTapTimer);
+      lastTapTime = 0;
+      // Double tap left = -10s, right = +10s
+      if (relX < 0.42) {
+        seekTo((videoEl.currentTime || 0) - 10);
+        showHud("⏪", "Lùi 10 giây", formatTimeShort(videoEl.currentTime || 0).split(".")[0]);
+      } else if (relX > 0.58) {
+        seekTo((videoEl.currentTime || 0) + 10);
+        showHud("⏩", "Tiến 10 giây", formatTimeShort(videoEl.currentTime || 0).split(".")[0]);
+      } else {
+        togglePlay();
+      }
+    } else {
+      lastTapTime = now;
+      lastTapX = tapX;
+      const isFs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+      singleTapTimer = setTimeout(() => {
+        if (isFs) {
+          if (floatingBar && floatingBar.hidden) {
+            showFloatingBarTemporarily();
+          } else if (floatingBar) {
+            floatingBar.hidden = true;
+          }
+        } else {
+          togglePlay();
+        }
+      }, 260);
+    }
+  });
+
+  // Desktop mouse click support (only when not triggered by touch)
+  let lastTouchEnd = 0;
+  box.addEventListener("touchend", () => {
+    lastTouchEnd = Date.now();
+  }, { passive: true });
+  videoEl.addEventListener("click", () => {
+    if (Date.now() - lastTouchEnd < 400) return;
+    togglePlay();
+  });
 }
