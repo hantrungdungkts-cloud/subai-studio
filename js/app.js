@@ -239,13 +239,30 @@ async function handleVideoFile(file) {
     } catch (audioErr) {
       console.warn("Audio decode warning:", audioErr);
       currentPcm16k = null;
-      showToast("Trình duyệt không giải mã được track âm thanh của video này (thử file MP4 chuẩn AAC).", "error", 5000);
+    }
+
+    // Ensure we get exact duration from <video> tag even if audio decode failed
+    if (!duration || duration <= 0) {
+      await new Promise((resolve) => {
+        const tempVideo = document.createElement("video");
+        tempVideo.preload = "metadata";
+        tempVideo.src = currentVideoObjectUrl;
+        tempVideo.onloadedmetadata = () => {
+          if (tempVideo.duration && isFinite(tempVideo.duration)) {
+            duration = tempVideo.duration;
+          }
+          resolve();
+        };
+        tempVideo.onerror = () => resolve();
+        setTimeout(resolve, 2000);
+      });
     }
 
     const videoId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     state.video = {
       videoId,
       filename: file.name,
+      videoUrl: currentVideoObjectUrl,
       mediaUrl: currentVideoObjectUrl,
       duration: duration || 0,
       width: 1280,
@@ -623,6 +640,7 @@ async function loadProjectIntoStudio(videoId) {
     state.video = {
       videoId: proj.videoId,
       filename: proj.filename,
+      videoUrl: currentVideoObjectUrl || "",
       mediaUrl: currentVideoObjectUrl || "",
       duration: proj.duration || 0,
       width: 1280,

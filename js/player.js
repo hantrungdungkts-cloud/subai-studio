@@ -90,8 +90,18 @@ export function initPlayer() {
   });
 
   videoEl.addEventListener("loadedmetadata", () => {
-    durationLabel.textContent = formatTimeShort(videoEl.duration || state.video?.duration || 0);
+    const dur = videoEl.duration || state.video?.duration || 0;
+    if (state.video && (!state.video.duration || state.video.duration <= 0)) {
+      state.video.duration = dur;
+    }
+    durationLabel.textContent = formatTimeShort(dur);
     renderOverlay();
+  });
+
+  videoEl.addEventListener("error", (e) => {
+    console.error("Video error event:", videoEl.error);
+    const code = videoEl.error ? videoEl.error.code : 0;
+    console.warn(`Video playback code: ${code}, src: ${videoEl.src}`);
   });
 
   videoEl.addEventListener("timeupdate", () => {
@@ -127,11 +137,14 @@ export function initPlayer() {
   });
 
   on("video:loaded", (video) => {
-    videoEl.src = video.videoUrl;
-    videoEl.load();
+    const src = video.videoUrl || video.mediaUrl || "";
+    if (src) {
+      videoEl.src = src;
+      videoEl.load();
+    }
     state.currentTime = 0;
     currentTimeLabel.textContent = formatTimeShort(0);
-    durationLabel.textContent = formatTimeShort(video.duration);
+    durationLabel.textContent = formatTimeShort(video.duration || 0);
     renderOverlay();
   });
 
