@@ -1663,7 +1663,7 @@ body.mobile-mode .topbar {
   flex-wrap: wrap !important;
   align-items: center !important;
   justify-content: space-between !important;
-  padding: 8px 10px !important;
+  padding: max(12px, env(safe-area-inset-top)) 10px 8px 10px !important;
   gap: 6px !important;
   height: auto !important;
   min-height: 0 !important;
